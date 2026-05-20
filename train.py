@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import random
 import time
 from dataclasses import asdict
@@ -11,10 +12,13 @@ from typing import Dict
 
 import numpy as np
 import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 
 from config import CFG, Config
 from dataset import build_dataloaders
-from model import PPGGSRCLIP, clip_contrastive_loss, retrieval_accuracy, pair_rank_metrics
+from model import PPGGSRCLIP, clip_contrastive_loss, pair_rank_metrics, retrieval_accuracy
 
 
 def set_seed(seed: int) -> None:
@@ -22,12 +26,6 @@ def set_seed(seed: int) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-
-
-def resolve_device(device_name: str) -> torch.device:
-    if device_name == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    return torch.device(device_name)
 
 
 def parse_args() -> argparse.Namespace:
@@ -41,6 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", type=str, default=CFG.train.device)
     parser.add_argument("--checkpoint_dir", type=Path, default=CFG.train.checkpoint_dir)
     parser.add_argument("--split_by_subject", action="store_true", help="Split train/val by subject (not by sample)")
+    parser.add_argument("--use_ddp", action="store_true", help="Enable DistributedDataParallel (launch with torchrun)")
     return parser.parse_args()
 
 
@@ -56,8 +55,36 @@ def apply_overrides(cfg: Config, args: argparse.Namespace) -> Config:
     return cfg
 
 
+def init_distributed(args: argparse.Namespace) -> tuple[bool, int, int, int, torch.device]:
+    if not args.use_ddp:
+        if args.device == "auto":
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            device = torch.device(args.device)
+        return False, 0, 1, 0, device
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("DDP requires CUDA. Please run with GPUs and torchrun.")
+
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    rank = int(os.environ.get("RANK", "0"))
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend="nccl")
+    device = torch.device(f"cuda:{local_rank}")
+    return True, local_rank, world_size, rank, device
+
+
+def is_main_process(distributed: bool, rank: int) -> bool:
+    return (not distributed) or rank == 0
+
+
+def unwrap_model(model: PPGGSRCLIP | DDP) -> PPGGSRCLIP:
+    return model.module if isinstance(model, DDP) else model
+
+
 def run_epoch(
-    model: PPGGSRCLIP,
+    model: PPGGSRCLIP | DDP,
     loader: torch.utils.data.DataLoader,
     device: torch.device,
     optimizer: torch.optim.Optimizer | None = None,
@@ -75,8 +102,8 @@ def run_epoch(
     total_batches = 0
 
     for batch in loader:
-        ppg = batch["ppg"].to(device)
-        gsr = batch["gsr"].to(device)
+        ppg = batch["ppg"].to(device, non_blocking=True)
+        gsr = batch["gsr"].to(device, non_blocking=True)
 
         with torch.set_grad_enabled(is_train):
             logits, _, _ = model(ppg, gsr)
@@ -130,117 +157,147 @@ def save_checkpoint(
     )
 
 
+def save_encoder_checkpoint(path: Path, model: PPGGSRCLIP, epoch: int, cfg: Config, metrics: Dict[str, float]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "epoch": epoch,
+            "ppg_encoder_state_dict": model.ppg_encoder.state_dict(),
+            "gsr_encoder_state_dict": model.gsr_encoder.state_dict(),
+            "model_config": asdict(cfg.model),
+            "metrics": metrics,
+        },
+        path,
+    )
+
+
 def main() -> None:
     args = parse_args()
     cfg = apply_overrides(CFG, args)
-    set_seed(cfg.train.seed)
+    distributed, local_rank, world_size, rank, device = init_distributed(args)
+    set_seed(cfg.train.seed + rank)
 
-    print("Building dataloaders...")
-    device = resolve_device(cfg.train.device)
-    print(f"Using device: {device}")
+    if is_main_process(distributed, rank):
+        print("Building dataloaders...")
+        print(f"Using device: {device}")
+        if distributed:
+            print(f"DDP enabled: world_size={world_size}, rank={rank}, local_rank={local_rank}")
+
     train_loader, val_loader, test_loader = build_dataloaders(
-        cfg.data, 
-        seed=cfg.train.seed, 
+        cfg.data,
+        seed=cfg.train.seed,
         split_by_subject=args.split_by_subject,
         val_ratio=0.1,
         test_ratio=0.1,
+        distributed=distributed,
+        rank=rank,
+        world_size=world_size,
     )
-    print(f"Train batches: {len(train_loader)}")
-    if val_loader:
-        print(f"Val batches: {len(val_loader)}")
-    if test_loader:
-        print(f"Test batches: {len(test_loader)}")
 
-    model = PPGGSRCLIP(cfg.model).to(device)
-    print(f"Model initialized with {sum(p.numel() for p in model.parameters())} parameters")
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=cfg.train.learning_rate,
-        weight_decay=cfg.train.weight_decay,
-    )
+    if is_main_process(distributed, rank):
+        print(f"Train batches: {len(train_loader)}")
+        if val_loader:
+            print(f"Val batches: {len(val_loader)}")
+        if test_loader:
+            print(f"Test batches: {len(test_loader)}")
+
+    raw_model = PPGGSRCLIP(cfg.model).to(device)
+    if distributed:
+        model: PPGGSRCLIP | DDP = DDP(raw_model, device_ids=[local_rank], output_device=local_rank)
+    else:
+        model = raw_model
+
+    if is_main_process(distributed, rank):
+        print(f"Model initialized with {sum(p.numel() for p in raw_model.parameters())} parameters")
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.train.learning_rate, weight_decay=cfg.train.weight_decay)
 
     best_val_loss = float("inf")
     start_time = time.time()
+    train_sampler = train_loader.sampler if isinstance(train_loader.sampler, DistributedSampler) else None
+
     for epoch in range(1, cfg.train.epochs + 1):
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)
+
         epoch_start_time = time.time()
-        print(f"Epoch {epoch}/{cfg.train.epochs}")
         train_metrics = run_epoch(model, train_loader, device, optimizer)
         val_metrics = None
         test_metrics = None
-        message = (
-            f"epoch={epoch:03d} "
-            f"train_loss={train_metrics['loss']:.4f} "
-            f"train_ppg2gsr={train_metrics['ppg_to_gsr_acc']:.4f} "
-            f"train_gsr2ppg={train_metrics['gsr_to_ppg_acc']:.4f} "
-            f"train_ppg_mean_rank={train_metrics['ppg_mean_rank']:.2f} "
-            f"train_ppg_median_rank={train_metrics['ppg_median_rank']:.2f} "
-            f"train_gsr_mean_rank={train_metrics['gsr_mean_rank']:.2f} "
-            f"train_gsr_median_rank={train_metrics['gsr_median_rank']:.2f}"
-        )
+
         if val_loader is not None:
             val_metrics = run_epoch(model, val_loader, device)
-            message += (
-                f" val_loss={val_metrics['loss']:.4f} "
-                f"val_ppg2gsr={val_metrics['ppg_to_gsr_acc']:.4f} "
-                f"val_gsr2ppg={val_metrics['gsr_to_ppg_acc']:.4f} "
-                f"val_ppg_mean_rank={val_metrics['ppg_mean_rank']:.2f} "
-                f"val_ppg_median_rank={val_metrics['ppg_median_rank']:.2f} "
-                f"val_gsr_mean_rank={val_metrics['gsr_mean_rank']:.2f} "
-                f"val_gsr_median_rank={val_metrics['gsr_median_rank']:.2f}"
-            )
 
-            if val_metrics["loss"] < best_val_loss:
+        if test_loader is not None:
+            test_metrics = run_epoch(model, test_loader, device)
+
+        if is_main_process(distributed, rank):
+            message = (
+                f"epoch={epoch:03d} "
+                f"train_loss={train_metrics['loss']:.4f} "
+                f"train_ppg2gsr={train_metrics['ppg_to_gsr_acc']:.4f} "
+                f"train_gsr2ppg={train_metrics['gsr_to_ppg_acc']:.4f} "
+                f"train_ppg_mean_rank={train_metrics['ppg_mean_rank']:.2f} "
+                f"train_ppg_median_rank={train_metrics['ppg_median_rank']:.2f} "
+                f"train_gsr_mean_rank={train_metrics['gsr_mean_rank']:.2f} "
+                f"train_gsr_median_rank={train_metrics['gsr_median_rank']:.2f}"
+            )
+            if val_metrics is not None:
+                message += (
+                    f" val_loss={val_metrics['loss']:.4f} "
+                    f"val_ppg2gsr={val_metrics['ppg_to_gsr_acc']:.4f} "
+                    f"val_gsr2ppg={val_metrics['gsr_to_ppg_acc']:.4f} "
+                    f"val_ppg_mean_rank={val_metrics['ppg_mean_rank']:.2f} "
+                    f"val_ppg_median_rank={val_metrics['ppg_median_rank']:.2f} "
+                    f"val_gsr_mean_rank={val_metrics['gsr_mean_rank']:.2f} "
+                    f"val_gsr_median_rank={val_metrics['gsr_median_rank']:.2f}"
+                )
+            if test_metrics is not None:
+                message += (
+                    f" test_loss={test_metrics['loss']:.4f} "
+                    f"test_ppg2gsr={test_metrics['ppg_to_gsr_acc']:.4f} "
+                    f"test_gsr2ppg={test_metrics['gsr_to_ppg_acc']:.4f} "
+                    f"test_ppg_mean_rank={test_metrics['ppg_mean_rank']:.2f} "
+                    f"test_ppg_median_rank={test_metrics['ppg_median_rank']:.2f} "
+                    f"test_gsr_mean_rank={test_metrics['gsr_mean_rank']:.2f} "
+                    f"test_gsr_median_rank={test_metrics['gsr_median_rank']:.2f}"
+                )
+            message += f" [time={time.time() - epoch_start_time:.2f}s]"
+            print(message)
+
+            model_to_save = unwrap_model(model)
+            if val_metrics is not None and val_metrics["loss"] < best_val_loss:
                 best_val_loss = val_metrics["loss"]
+                save_checkpoint(cfg.train.checkpoint_dir / "best.pt", model_to_save, optimizer, epoch, cfg, val_metrics)
+                save_encoder_checkpoint(cfg.train.checkpoint_dir / "best_encoder.pt", model_to_save, epoch, cfg, val_metrics)
+
+            if epoch % cfg.train.save_every == 0:
                 save_checkpoint(
-                    cfg.train.checkpoint_dir / "best.pt",
-                    model,
+                    cfg.train.checkpoint_dir / f"epoch_{epoch:03d}.pt",
+                    model_to_save,
                     optimizer,
                     epoch,
                     cfg,
-                    val_metrics,
+                    test_metrics or val_metrics or train_metrics,
                 )
-        
-        test_metrics = None
-        if test_loader is not None:
-            test_metrics = run_epoch(model, test_loader, device)
-            message += (
-                f" test_loss={test_metrics['loss']:.4f} "
-                f"test_ppg2gsr={test_metrics['ppg_to_gsr_acc']:.4f} "
-                f"test_gsr2ppg={test_metrics['gsr_to_ppg_acc']:.4f} "
-                f"test_ppg_mean_rank={test_metrics['ppg_mean_rank']:.2f} "
-                f"test_ppg_median_rank={test_metrics['ppg_median_rank']:.2f} "
-                f"test_gsr_mean_rank={test_metrics['gsr_mean_rank']:.2f} "
-                f"test_gsr_median_rank={test_metrics['gsr_median_rank']:.2f}"
-            )
 
-        epoch_time = time.time() - epoch_start_time
-        message += f" [time={epoch_time:.2f}s]"
-        print(message)
+    if is_main_process(distributed, rank):
+        save_checkpoint(
+            cfg.train.checkpoint_dir / "last.pt",
+            unwrap_model(model),
+            optimizer,
+            cfg.train.epochs,
+            cfg,
+            test_metrics or val_metrics or train_metrics,
+        )
+        total_time = time.time() - start_time
+        hours = int(total_time // 3600)
+        minutes = int((total_time % 3600) // 60)
+        seconds = total_time % 60
+        print(f"\nTraining completed in {hours}h {minutes}m {seconds:.2f}s")
 
-        if epoch % cfg.train.save_every == 0:
-            save_checkpoint(
-                cfg.train.checkpoint_dir / f"epoch_{epoch:03d}.pt",
-                model,
-                optimizer,
-                epoch,
-                cfg,
-                test_metrics or val_metrics or train_metrics,
-            )
-
-    save_checkpoint(
-        cfg.train.checkpoint_dir / "last.pt",
-        model,
-        optimizer,
-        cfg.train.epochs,
-        cfg,
-        test_metrics or val_metrics or train_metrics,
-    )
-    
-    total_time = time.time() - start_time
-    hours = int(total_time // 3600)
-    minutes = int((total_time % 3600) // 60)
-    seconds = total_time % 60
-    print(f"\nTraining completed in {hours}h {minutes}m {seconds:.2f}s")
+    if distributed:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

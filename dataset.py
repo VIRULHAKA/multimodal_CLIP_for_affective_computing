@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import DataLoader, Dataset, Subset, random_split
+from torch.utils.data.distributed import DistributedSampler
 
 from config import DataConfig
 
@@ -278,11 +279,14 @@ def split_dataset_by_subject(
 
 
 def build_dataloaders(
-    cfg: DataConfig, 
-    seed: int, 
+    cfg: DataConfig,
+    seed: int,
     split_by_subject: bool = False,
     val_ratio: float = 0.1,
     test_ratio: float = 0.1,
+    distributed: bool = False,
+    rank: int = 0,
+    world_size: int = 1,
 ) -> Tuple[DataLoader, DataLoader | None, DataLoader | None]:
     """Build train, validation, and test dataloaders.
     
@@ -311,30 +315,39 @@ def build_dataloaders(
     else:
         train_set, val_set, test_set = split_dataset(dataset, val_ratio, test_ratio, seed)
 
+    train_sampler = None
+    if distributed:
+        train_sampler = DistributedSampler(train_set, num_replicas=world_size, rank=rank, shuffle=True)
+
     train_loader = DataLoader(
         train_set,
         batch_size=cfg.batch_size,
-        shuffle=True,
+        shuffle=train_sampler is None,
+        sampler=train_sampler,
         num_workers=cfg.num_workers,
         drop_last=cfg.drop_last,
     )
 
     val_loader = None
     if len(val_set) > 0:
+        val_sampler = DistributedSampler(val_set, num_replicas=world_size, rank=rank, shuffle=False) if distributed else None
         val_loader = DataLoader(
             val_set,
             batch_size=cfg.batch_size,
             shuffle=False,
+            sampler=val_sampler,
             num_workers=cfg.num_workers,
             drop_last=False,
         )
     
     test_loader = None
     if len(test_set) > 0:
+        test_sampler = DistributedSampler(test_set, num_replicas=world_size, rank=rank, shuffle=False) if distributed else None
         test_loader = DataLoader(
             test_set,
             batch_size=cfg.batch_size,
             shuffle=False,
+            sampler=test_sampler,
             num_workers=cfg.num_workers,
             drop_last=False,
         )
