@@ -40,6 +40,10 @@ def downsample_gsr_files(data_dir: Path, downsample_factor: int = 2, suffix: str
     
     for gsr_path in gsr_files:
         # Load signal (may be 2D with [timestamp, value] or 1D)
+        subject_id = int(gsr_path.stem[:4])
+        if subject_id < 3000: 
+            print(f"Skipping {gsr_path} (subject ID {subject_id} < 3000)")
+            continue
         data = np.load(gsr_path, mmap_mode="r")
         
         if data.ndim == 2:
