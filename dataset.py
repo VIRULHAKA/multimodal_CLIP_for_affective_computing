@@ -68,12 +68,12 @@ class PPGGSRNpyDataset(Dataset):
         Returns list of (gsr_path, ppg_path) tuples.
         Expects files named like: {name}_gsr.npy and {name}_ppg.npy
         """
-        gsr_files = sorted(data_dir.rglob("*_GSR.npy"))
+        gsr_files = sorted(data_dir.rglob("*_GSR_20hz.npy"))
         ppg_map = {p.stem.replace("_PPG", ""): p for p in sorted(data_dir.rglob("*_PPG.npy"))}
         
         pairs = []
         for gsr_path in gsr_files:
-            stem = gsr_path.stem.replace("_GSR", "")
+            stem = gsr_path.stem.replace("_GSR_20hz", "")
             ppg_path = data_dir / f"{stem}_PPG.npy"
             if ppg_path.exists():
                 pairs.append((gsr_path, ppg_path))
