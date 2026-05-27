@@ -126,7 +126,7 @@ class PPGGSRCLIP(nn.Module):
     def forward(self, ppg: torch.Tensor, gsr: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         ppg_z = self.encode_ppg(ppg)
         gsr_z = self.encode_gsr(gsr)
-        logit_scale = self.logit_scale.exp().clamp(max=100.0)
+        logit_scale = self.logit_scale.exp().clamp(min=1.0, max=50.0)
         logits = logit_scale * ppg_z @ gsr_z.t()
         return logits, ppg_z, gsr_z
 

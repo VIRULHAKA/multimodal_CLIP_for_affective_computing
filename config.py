@@ -38,7 +38,7 @@ class ModelConfig:
     num_heads: int = 4
     mlp_ratio: float = 4.0
     dropout: float = 0.1
-    temperature: float = 0.07
+    temperature: float = 0.1 # 0.07
 
 
 @dataclass

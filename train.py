@@ -106,7 +106,7 @@ def run_epoch(
         gsr = batch["gsr"].to(device, non_blocking=True)
 
         with torch.set_grad_enabled(is_train):
-            logits, _, _ = model(ppg, gsr)
+            logits, ppg_z, gsr_z = model(ppg, gsr)
             loss = clip_contrastive_loss(logits)
             ppg_acc, gsr_acc = retrieval_accuracy(logits)
             ppg_mean_rank, ppg_median_rank, gsr_mean_rank, gsr_median_rank = pair_rank_metrics(logits)
@@ -124,6 +124,11 @@ def run_epoch(
         total_gsr_mean_rank += gsr_mean_rank.item()
         total_gsr_median_rank += gsr_median_rank.item()
         total_batches += 1
+
+        with torch.no_grad():
+            sim_matrix = ppg_z @ ppg_z.T  # 同模态内部相似度
+            off_diag = sim_matrix[~torch.eye(len(sim_matrix), dtype=bool)].mean()
+            print(f"PPG intra-modal mean cosine sim: {off_diag:.4f}")
 
     return {
         "loss": total_loss / max(total_batches, 1),
