@@ -31,7 +31,7 @@ from scipy.signal import butter, filtfilt
 # Constants
 # ---------------------------------------------------------------------------
 
-GSR_THRESHOLD: float = 0.006
+GSR_THRESHOLD: float = 0.007
 SAMPLE_RATE: float = 20.0  # Hz — both GSR and PPG
 
 
