@@ -35,7 +35,7 @@ class ModelConfig:
     transformer_dim: int = 128
     patch_size: int = 10
     depth: int = 4
-    num_heads: int = 8
+    num_heads: int = 4
     mlp_ratio: float = 4.0
     dropout: float = 0.1
     temperature: float = 0.07

@@ -23,7 +23,7 @@ class SignalTransformerEncoder(nn.Module):
         input_channels: int = 1,
         embed_dim: int = 128,
         transformer_dim: int = 128,
-        patch_size: int = 10,
+        patch_size: int = 600,
         depth: int = 4,
         num_heads: int = 8,
         mlp_ratio: float = 4.0,
@@ -54,7 +54,10 @@ class SignalTransformerEncoder(nn.Module):
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=depth)
         self.norm = nn.LayerNorm(transformer_dim)
-        self.projection = nn.Linear(transformer_dim, embed_dim)
+        self.projection = nn.Sequential(nn.Linear(
+            transformer_dim, transformer_dim), 
+            nn.GELU(), 
+            nn.Linear(transformer_dim, embed_dim))  
         self._init_weights()
 
     def _init_weights(self) -> None:
@@ -138,21 +141,27 @@ def clip_contrastive_loss(logits: torch.Tensor) -> torch.Tensor:
 def retrieval_accuracy(logits: torch.Tensor, k: int = 5) -> tuple[torch.Tensor, torch.Tensor]:
     """Top-k retrieval accuracy in both directions for a batch."""
 
+    # labels = torch.arange(logits.size(0), device=logits.device)
+    
+    # # PPG to GSR: for each PPG (row), check if correct GSR is in top-k predictions
+    # _, ppg_topk_indices = logits.topk(k, dim=1)  # (N, k)
+    # ppg_correct = torch.zeros_like(labels, dtype=torch.bool)
+    # for i in range(logits.size(0)):
+    #     ppg_correct[i] = labels[i] in ppg_topk_indices[i]
+    # ppg_to_gsr = ppg_correct.float().mean()
+    
+    # # GSR to PPG: for each GSR (column), check if correct PPG is in top-k predictions
+    # _, gsr_topk_indices = logits.topk(k, dim=0)  # (k, N)
+    # gsr_correct = torch.zeros_like(labels, dtype=torch.bool)
+    # for j in range(logits.size(0)):
+    #     gsr_correct[j] = labels[j] in gsr_topk_indices[:, j]
+    # gsr_to_ppg = gsr_correct.float().mean()
+
     labels = torch.arange(logits.size(0), device=logits.device)
-    
-    # PPG to GSR: for each PPG (row), check if correct GSR is in top-k predictions
-    _, ppg_topk_indices = logits.topk(k, dim=1)  # (N, k)
-    ppg_correct = torch.zeros_like(labels, dtype=torch.bool)
-    for i in range(logits.size(0)):
-        ppg_correct[i] = labels[i] in ppg_topk_indices[i]
-    ppg_to_gsr = ppg_correct.float().mean()
-    
-    # GSR to PPG: for each GSR (column), check if correct PPG is in top-k predictions
-    _, gsr_topk_indices = logits.topk(k, dim=0)  # (k, N)
-    gsr_correct = torch.zeros_like(labels, dtype=torch.bool)
-    for j in range(logits.size(0)):
-        gsr_correct[j] = labels[j] in gsr_topk_indices[:, j]
-    gsr_to_ppg = gsr_correct.float().mean()
+    topk = logits.topk(k, dim=1).indices          # (N, k)
+    ppg_to_gsr = (topk == labels.unsqueeze(1)).any(dim=1).float().mean()
+    topk_t = logits.t().topk(k, dim=1).indices
+    gsr_to_ppg = (topk_t == labels.unsqueeze(1)).any(dim=1).float().mean()
     
     return ppg_to_gsr, gsr_to_ppg
 
@@ -169,27 +178,8 @@ def pair_rank_metrics(logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor,
         gsr_mean_rank: mean rank for GSR to PPG matching
         gsr_median_rank: median rank for GSR to PPG matching
     """
+    # 
     labels = torch.arange(logits.size(0), device=logits.device)
-    batch_size = logits.size(0)
-    
-    # PPG to GSR: for each row i, find rank of position i in descending order
-    sorted_indices_ppg = torch.argsort(logits, dim=1, descending=True)  # (N, N)
-    ppg_ranks = torch.zeros(batch_size, device=logits.device)
-    for i in range(batch_size):
-        rank = torch.where(sorted_indices_ppg[i] == i)[0].item() + 1
-        ppg_ranks[i] = rank
-    
-    ppg_mean_rank = ppg_ranks.mean()
-    ppg_median_rank = torch.median(ppg_ranks)
-    
-    # GSR to PPG: for each column j, find rank of position j in descending order
-    sorted_indices_gsr = torch.argsort(logits, dim=0, descending=True)  # (N, N)
-    gsr_ranks = torch.zeros(batch_size, device=logits.device)
-    for j in range(batch_size):
-        rank = torch.where(sorted_indices_gsr[:, j] == j)[0].item() + 1
-        gsr_ranks[j] = rank
-    
-    gsr_mean_rank = gsr_ranks.mean()
-    gsr_median_rank = torch.median(gsr_ranks)
-    
-    return ppg_mean_rank, ppg_median_rank, gsr_mean_rank, gsr_median_rank
+    ranks_ppg = (logits.argsort(dim=1, descending=True) == labels.unsqueeze(1)).nonzero()[:, 1] + 1
+    ranks_gsr = (logits.t().argsort(dim=1, descending=True) == labels.unsqueeze(1)).nonzero()[:, 1] + 1
+    return ranks_ppg.float().mean(), ranks_ppg.float().median(), ranks_gsr.float().mean(), ranks_gsr.float().median()
