@@ -63,7 +63,10 @@ def _session_id(filename: str) -> str:
 def _load_1d(path: Path) -> np.ndarray:
     data = np.load(path)
     if data.ndim != 1:
-        raise ValueError(f"Expected 1D array, got shape {data.shape} in {path}")
+        if data.ndim == 2 and data.shape[1] > 1:
+            data = data[:, 1]  # take second column if multiple channels
+        else:
+            raise ValueError(f"Expected 1D array, got shape {data.shape} in {path}")
     return data.astype(np.float32)
 
 
