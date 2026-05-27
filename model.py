@@ -62,8 +62,10 @@ class SignalTransformerEncoder(nn.Module):
 
     def _init_weights(self) -> None:
         nn.init.trunc_normal_(self.cls_token, std=0.02)
-        nn.init.xavier_uniform_(self.projection.weight)
-        nn.init.zeros_(self.projection.bias)
+        for layer in self.projection:
+            if isinstance(layer, nn.Linear):
+                nn.init.xavier_uniform_(layer.weight)
+                nn.init.zeros_(layer.bias)
 
     @staticmethod
     def _sinusoidal_positional_encoding(length: int, dim: int, device: torch.device) -> torch.Tensor:
