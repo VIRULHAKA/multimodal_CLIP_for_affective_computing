@@ -125,7 +125,7 @@ def run_epoch(
         total_gsr_median_rank += gsr_median_rank.item()
         total_batches += 1
 
-        if batch_dix % 100 == 0:
+        if batch_dix % 1000 == 0:
             with torch.no_grad():
                 sim_matrix = ppg_z @ ppg_z.T  # 同模态内部相似度
                 off_diag = sim_matrix[~torch.eye(len(sim_matrix), dtype=bool)].mean()
