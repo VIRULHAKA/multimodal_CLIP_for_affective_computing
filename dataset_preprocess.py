@@ -52,9 +52,9 @@ class FilterConfig:
 # ---------------------------------------------------------------------------
 
 def _session_id(filename: str) -> str:
-    """Strip _GSR / _PPG suffix to get session id."""
+    """Strip _GSR_20hz / _PPG suffix to get session id."""
     stem = Path(filename).stem
-    for suffix in ("_GSR", "_PPG"):
+    for suffix in ("_GSR_20hz", "_PPG"):
         if stem.endswith(suffix):
             return stem[: -len(suffix)]
     return stem
