@@ -131,13 +131,21 @@ class PPGGSRCLIP(nn.Module):
         return logits, ppg_z, gsr_z
 
 
-def clip_contrastive_loss(logits: torch.Tensor) -> torch.Tensor:
+def uniformity_loss(z: torch.Tensor, t: float = 2.0) -> torch.Tensor:
+    sq_dists = torch.pdist(z, p=2).pow(2)
+    return sq_dists.mul(-t).exp().mean().log()
+
+
+def clip_contrastive_loss(logits: torch.Tensor, ppg_z, gsr_z) -> torch.Tensor:
     """Symmetric InfoNCE loss for matched PPG/GSR batches."""
 
     labels = torch.arange(logits.size(0), device=logits.device)
-    loss_ppg_to_gsr = F.cross_entropy(logits, labels)
-    loss_gsr_to_ppg = F.cross_entropy(logits.t(), labels)
-    return (loss_ppg_to_gsr + loss_gsr_to_ppg) / 2.0
+    loss_ppg = F.cross_entropy(logits, labels)
+    loss_gsr = F.cross_entropy(logits.t(), labels)
+    contrastive = (loss_ppg + loss_gsr) / 2.0
+    
+    uni = (uniformity_loss(ppg_z) + uniformity_loss(gsr_z)) / 2.0
+    return contrastive + 0.5 * uni # uniformity weight = 0.5
 
 
 def retrieval_accuracy(logits: torch.Tensor, k: int = 5) -> tuple[torch.Tensor, torch.Tensor]:
