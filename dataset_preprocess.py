@@ -71,7 +71,7 @@ def _match_pairs(data_dir: Path) -> Dict[str, Tuple[Path, Path]]:
     """Return {session_id: (gsr_path, ppg_path)} for all matched pairs."""
     ppg_map = {_session_id(p.name): p for p in sorted(data_dir.rglob("*_PPG.npy"))}
     pairs = {}
-    for gsr_path in sorted(data_dir.rglob("*_GSR.npy")):
+    for gsr_path in sorted(data_dir.rglob("*_GSR_20hz.npy")):
         sid = _session_id(gsr_path.name)
         if sid in ppg_map:
             pairs[sid] = (gsr_path, ppg_map[sid])
