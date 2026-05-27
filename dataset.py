@@ -120,7 +120,11 @@ class PPGGSRNpyDataset(Dataset):
             # Extract subject_id from filename (e.g., "1001_session1_gsr.npy" -> "1001")
             subject_id = gsr_path.stem.split("_")[0]
             
-            gsr_signal, ppg_signal = self._load_paired_npy(gsr_path, ppg_path)
+            try: 
+                gsr_signal, ppg_signal = self._load_paired_npy(gsr_path, ppg_path)
+            except Exception as e:
+                print(f"Error loading {gsr_path} and {ppg_path}: {e}")
+                continue
             print(f"Loaded {gsr_path.name}: {len(gsr_signal)} samples, {ppg_path.name}: {len(ppg_signal)} samples (subject={subject_id})")
             
             if len(gsr_signal) < self.window_size or len(ppg_signal) < self.window_size:
