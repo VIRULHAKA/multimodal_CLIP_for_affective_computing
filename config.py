@@ -17,8 +17,8 @@ class DataConfig:
     """
 
     data_dir: Path = Path("data/npy")
-    window_size: int = 400
-    stride: int = 200
+    window_size: int = 400 # I remember that I used 600
+    stride: int = 200 # and 300
     batch_size: int = 64
     num_workers: int = 0
     val_ratio: float = 0.2
@@ -33,7 +33,9 @@ class ModelConfig:
     input_channels: int = 1
     embed_dim: int = 128
     transformer_dim: int = 128
-    patch_size: int = 40
+    patch_size: int = 40 # 10   6/3 must use patch_size = 10 if want to use pretrained weights from last week
+    # must notice that PPG and GSR have different changing cycles, so it is better to use different patch sizes for them
+    # better to do PPG_patch = 20? GSR_patch = 50-60?
     depth: int = 4
     num_heads: int = 4
     mlp_ratio: float = 4.0
