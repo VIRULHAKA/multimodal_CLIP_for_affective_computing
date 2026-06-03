@@ -33,7 +33,7 @@ class ModelConfig:
     input_channels: int = 1
     embed_dim: int = 128
     transformer_dim: int = 128
-    patch_size: int = 10
+    patch_size: int = 40
     depth: int = 4
     num_heads: int = 4
     mlp_ratio: float = 4.0
